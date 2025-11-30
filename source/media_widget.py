@@ -44,6 +44,18 @@ class DynamicIsland(QMainWindow):
         self.img_next = load_or_create_icon(IMG_NEXT_FILE, "next")
         self.img_prev = load_or_create_icon(IMG_PREV_FILE, "prev")
         
+        # Load CD Image
+        self.img_cd = QPixmap(IMG_CD_FILE)
+        if self.img_cd.isNull():
+            # Fallback simple circle if file missing
+            self.img_cd = QPixmap(200, 200)
+            self.img_cd.fill(Qt.GlobalColor.transparent)
+            p = QPainter(self.img_cd)
+            p.setBrush(QBrush(QColor(30, 30, 30)))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(0, 0, 200, 200)
+            p.end()
+        
         # Setup timers
         self.anim_timer = QTimer(self)
         self.anim_timer.timeout.connect(self.game_loop)
@@ -63,7 +75,6 @@ class DynamicIsland(QMainWindow):
         self.update_geometry()
 
     def _init_physics_state(self):
-        """Initialize physics animation state."""
         self.current_w = float(IDLE_W)
         self.current_h = float(IDLE_H)
         self.target_w = float(IDLE_W)
@@ -72,7 +83,6 @@ class DynamicIsland(QMainWindow):
         self.vel_h = 0.0
 
     def _init_button_state(self):
-        """Initialize button animation state."""
         self.btn_anim = {
             'play': {'scale': 0.2, 'offset': 0.0},
             'prev': {'scale': 0.2, 'offset': 0.0},
@@ -82,35 +92,39 @@ class DynamicIsland(QMainWindow):
         self.btn_hover_anims = {'prev': 0.0, 'play': 0.0, 'next': 0.0}
 
     def _init_visualizer_state(self):
-        """Initialize audio visualizer state."""
         self.vis_count = 100
         self.vis_bars = [0.0] * self.vis_count
         self.vis_offsets = [random.random() * 100 for _ in range(self.vis_count)]
         self.vis_multiplier = 0.0
 
     def _init_art_state(self):
-        """Initialize album art animation state."""
         self.art_flip_progress = 0.0
         self.art_fade_progress = 0.0
         self.prev_album_art = None
         self.is_flipping_art = False
         self.is_fading_art = False
+        self.art_is_square = True
+        self.cd_rotation = 0.0
+        self.box_fade_anim = 0.0 
+        self.dominant_color = QColor(20, 20, 20)
 
     def _init_text_state(self):
-        """Initialize text and scroll state."""
         self.temp_mode_active = False
         self.temp_mode_start_time = 0.0
         self.temp_mode_progress = 0.0
         
+        self.text_change_progress = 1.0 
+        
         self.scroll_x = 0.0
         self.scroll_wait_timer = 0.0
-        self.scroll_direction = 0  # 0: Wait, 1: Fwd, -1: Back
+        self.scroll_direction = 0
         self.text_fits = True
         self.title_text_width = 0.0
         self.available_text_w = 0.0
+        
+        self.idle_scale_anim = 1.0 
 
     def _init_media_state(self):
-        """Initialize media playback state."""
         self.bar_hover_anim = 0.0
         self.is_bar_hovered = False
         self.is_expanded = False
@@ -123,6 +137,7 @@ class DynamicIsland(QMainWindow):
         self.display_time = ""
         
         self.current_album_art = None
+        self.blurred_album_art = None # Store pre-blurred image
         self.last_img_bytes = b""
         
         self.display_pos = 0.0
@@ -130,7 +145,6 @@ class DynamicIsland(QMainWindow):
         self.last_tick_time = time.time()
 
     def setup_tray(self):
-        """Setup system tray icon."""
         self.tray_icon = QSystemTrayIcon(self)
         pixmap = QPixmap(32, 32)
         pixmap.fill(Qt.GlobalColor.transparent)
@@ -148,8 +162,25 @@ class DynamicIsland(QMainWindow):
         self.tray_icon.setContextMenu(menu)
         self.tray_icon.show()
 
+    def _generate_blurred_art(self, pixmap):
+        """Generates a high quality blur by downscaling and upscaling smoothly."""
+        if not pixmap or pixmap.isNull():
+            return None
+            
+        # Scale down significantly (e.g., to 64px) to lose detail
+        small_pix = pixmap.scaled(64, 64, 
+                                Qt.AspectRatioMode.KeepAspectRatioByExpanding, 
+                                Qt.TransformationMode.SmoothTransformation)
+        
+        # Scale back up to screen width to create smooth gradient/blur effect
+        # We start with a size larger than window to ensure coverage
+        target_size = max(self.screen_width, 1000) 
+        blurred = small_pix.scaled(target_size, target_size, 
+                                 Qt.AspectRatioMode.KeepAspectRatioByExpanding, 
+                                 Qt.TransformationMode.SmoothTransformation)
+        return blurred
+
     def on_metadata_sync(self, title, artist, is_playing, remote_pos, dur, img_bytes):
-        """Handle metadata updates from media worker."""
         track_changed = (self.raw_title != title)
         self.raw_title = title
         
@@ -164,12 +195,12 @@ class DynamicIsland(QMainWindow):
                 self.temp_mode_active = True
                 self.temp_mode_start_time = time.time()
                 
-            # Reset scroll state on track change
+            self.text_change_progress = 0.0
+            
             self.scroll_x = 0.0
             self.scroll_wait_timer = 5.0
             self.scroll_direction = 0
         
-        # Handle album art changes
         if img_bytes and img_bytes != self.last_img_bytes:
             new_pix = QPixmap()
             if new_pix.loadFromData(img_bytes):
@@ -177,22 +208,39 @@ class DynamicIsland(QMainWindow):
                 self.current_album_art = new_pix
                 self.last_img_bytes = img_bytes
                 
+                # Generate Blur immediately
+                self.blurred_album_art = self._generate_blurred_art(new_pix)
+                
+                if new_pix.width() > 0 and new_pix.height() > 0:
+                    ratio = new_pix.width() / new_pix.height()
+                    self.art_is_square = (0.9 < ratio < 1.1)
+                else:
+                    self.art_is_square = True
+
+                img = new_pix.toImage()
+                cx, cy = img.width() // 2, img.height() // 2
+                self.dominant_color = img.pixelColor(cx, cy)
+                
                 self.art_flip_progress = 0.0
                 self.is_flipping_art = True
                 self.art_fade_progress = 0.0
                 self.is_fading_art = True
+                self.box_fade_anim = 0.0
                 
         elif not img_bytes and self.last_img_bytes:
             self.prev_album_art = self.current_album_art
             self.current_album_art = None
+            self.blurred_album_art = None
             self.last_img_bytes = b""
+            self.dominant_color = QColor(20, 20, 20)
+            self.art_is_square = True
             
             self.art_flip_progress = 0.0
             self.is_flipping_art = True
             self.art_fade_progress = 0.0
             self.is_fading_art = True
+            self.box_fade_anim = 0.0
         
-        # Update playback position
         diff = abs(remote_pos - self.display_pos)
         is_glitch_zero = (remote_pos == 0.0 and self.display_pos > 5.0)
 
@@ -207,23 +255,15 @@ class DynamicIsland(QMainWindow):
         self.update()
 
     def update_clock_text(self):
-        """Update the clock display text."""
         now = datetime.now()
         am_pm = now.strftime("%p").replace("AM", "A.M.").replace("PM", "P.M.")
         self.display_time = now.strftime(f"%I:%M - {am_pm}")
 
     def game_loop(self):
-        """Main animation loop called every frame."""
-        # 1. Physics & Geometry
         self.animate_spring()
-        
-        # 2. Button animations
         btns_moving = self._animate_buttons()
-
-        # 3. Album art animations
         self._animate_album_art()
 
-        # 4. Text mode animation
         now_time = time.time()
         dt = now_time - self.last_tick_time
         if dt > 1.0:
@@ -231,24 +271,31 @@ class DynamicIsland(QMainWindow):
         self.last_tick_time = now_time
 
         text_animating = self._animate_temp_mode(now_time)
+        
+        self.text_change_progress += (1.0 - self.text_change_progress) * 0.1
+        text_changing = (self.text_change_progress < 0.99)
+        
+        self.box_fade_anim += (1.0 - self.box_fade_anim) * 0.05
+        box_fading = (self.box_fade_anim < 0.99)
 
-        # 5. Title scroll physics
         is_scrolling = self._animate_scroll(dt)
-
-        # 6. Visualizer
         self._animate_visualizer(now_time)
         
-        # 7. Progress bar hover
         target_bar = 1.0 if self.is_bar_hovered else 0.0
         self.bar_hover_anim += (target_bar - self.bar_hover_anim) * 0.2
         
-        # 8. Update progress
+        target_idle_scale = 1.0 if (self.title_text == "Idle") else 0.0
+        self.idle_scale_anim += (target_idle_scale - self.idle_scale_anim) * 0.1
+        idle_animating = (abs(self.idle_scale_anim - target_idle_scale) > 0.01)
+
+        if self.is_playing:
+            self.cd_rotation = (self.cd_rotation + 1.5) % 360
+        
         if self.is_playing and self.media_dur > 0:
             self.display_pos += dt
             if self.display_pos > self.media_dur:
                 self.display_pos = self.media_dur
 
-        # 9. Determine if repaint needed
         should_repaint = (
             self.is_playing or 
             self.vis_multiplier > 0.01 or 
@@ -256,16 +303,19 @@ class DynamicIsland(QMainWindow):
             self.is_fading_art or 
             btns_moving or 
             text_animating or
+            text_changing or
+            box_fading or
             self.temp_mode_active or
             abs(self.bar_hover_anim - target_bar) > 0.01 or
-            is_scrolling
+            is_scrolling or
+            self.is_playing or
+            idle_animating
         )
         
         if should_repaint:
             self.update()
 
     def _animate_buttons(self):
-        """Animate button hover and press effects."""
         btns_moving = False
         for key in ['prev', 'play', 'next']:
             target_hover = 1.0 if self.btn_hover_states[key] else 0.0
@@ -283,13 +333,11 @@ class DynamicIsland(QMainWindow):
         return btns_moving
 
     def _animate_album_art(self):
-        """Animate album art flip and fade transitions."""
         if self.is_flipping_art:
             self.art_flip_progress += 0.05
             if self.art_flip_progress >= 1.0:
                 self.art_flip_progress = 1.0
                 self.is_flipping_art = False
-                
         if self.is_fading_art:
             self.art_fade_progress += 0.04
             if self.art_fade_progress >= 1.0:
@@ -297,40 +345,30 @@ class DynamicIsland(QMainWindow):
                 self.is_fading_art = False
 
     def _animate_temp_mode(self, now_time):
-        """Animate temporary title display mode."""
         if self.temp_mode_active:
             if now_time - self.temp_mode_start_time > TEMP_MODE_DURATION:
                 self.temp_mode_active = False
             self.temp_mode_progress += (1.0 - self.temp_mode_progress) * 0.1
         else:
             self.temp_mode_progress += (0.0 - self.temp_mode_progress) * 0.1
-
         return (self.temp_mode_progress > 0.001 and self.temp_mode_progress < 0.999)
 
     def _animate_scroll(self, dt):
-        """Animate text scrolling with ping-pong logic."""
         should_scroll = (self.is_expanded or self.temp_mode_active) and not self.text_fits
         is_scrolling = False
-        
         if should_scroll:
             max_scroll = self.title_text_width - self.available_text_w
-            if max_scroll < 0:
-                max_scroll = 0
-            
+            if max_scroll < 0: max_scroll = 0
             if max_scroll > 0:
-                speed = 30.0  # pixels per second
-                
+                speed = 30.0
                 if self.scroll_wait_timer > 0:
                     self.scroll_wait_timer -= dt
                     if self.scroll_wait_timer <= 0:
                         self.scroll_wait_timer = 0
-                        if self.scroll_x <= 0:
-                            self.scroll_direction = 1
-                        elif self.scroll_x >= max_scroll:
-                            self.scroll_direction = -1
+                        if self.scroll_x <= 0: self.scroll_direction = 1
+                        elif self.scroll_x >= max_scroll: self.scroll_direction = -1
                 else:
-                    if self.scroll_direction == 0:
-                        self.scroll_wait_timer = 5.0
+                    if self.scroll_direction == 0: self.scroll_wait_timer = 5.0
                     elif self.scroll_direction == 1:
                         self.scroll_x += speed * dt
                         if self.scroll_x >= max_scroll:
@@ -343,20 +381,16 @@ class DynamicIsland(QMainWindow):
                             self.scroll_x = 0
                             self.scroll_direction = 0
                             self.scroll_wait_timer = 5.0
-                    
                     is_scrolling = True
         else:
             self.scroll_x = 0.0
             self.scroll_wait_timer = 0.0
             self.scroll_direction = 0
-
         return is_scrolling
 
     def _animate_visualizer(self, now_time):
-        """Animate audio visualizer bars."""
         target_vis = 1.0 if self.is_playing else 0.0
         self.vis_multiplier += (target_vis - self.vis_multiplier) * 0.1
-        
         for i in range(self.vis_count):
             if self.is_playing:
                 wave1 = math.sin(now_time * 5 + self.vis_offsets[i])
@@ -369,9 +403,7 @@ class DynamicIsland(QMainWindow):
                 self.vis_bars[i] += (0.05 - self.vis_bars[i]) * 0.1
 
     def animate_spring(self):
-        """Animate spring physics for window size."""
         has_media = (self.title_text != "Idle")
-        
         current_idle_w = MEDIA_IDLE_W + (MEDIA_TEMP_W - MEDIA_IDLE_W) * self.temp_mode_progress
         target_idle_w = current_idle_w if has_media else IDLE_W
         target_hover_w = MEDIA_HOVER_W if has_media else HOVER_W
@@ -407,7 +439,6 @@ class DynamicIsland(QMainWindow):
             self.update_geometry()
 
     def update_geometry(self):
-        """Update window geometry based on current size."""
         w = int(self.current_w)
         h = int(self.current_h)
         x = (self.screen_width - w) // 2
@@ -415,56 +446,40 @@ class DynamicIsland(QMainWindow):
         self.setGeometry(x, y, w, h)
 
     def enterEvent(self, event):
-        """Handle mouse enter event."""
         self.is_hovered = True
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        """Handle mouse leave event."""
         self.is_hovered = False
         self.is_expanded = False
         super().leaveEvent(event)
 
     def mouseMoveEvent(self, event):
-        """Handle mouse movement for hover effects."""
         if self.is_expanded and self.title_text != "Idle":
             w = self.width()
             h = self.height()
             pos = event.position()
             
             bar_y = h - BARYPOS
-            bar_x = 60
-            bar_w = w - 120
+            bar_x = 220 
+            bar_w = w - 240
             
             seek_rect = QRectF(bar_x, bar_y - 20, bar_w, 25)
             self.is_bar_hovered = seek_rect.contains(pos)
             
-            center_x = w / 2
+            center_x = bar_x + bar_w/2
             btn_y = h - BTNYPOS
             btn_hit_size = 50
             
-            self.btn_hover_states['prev'] = QRectF(
-                center_x - 60 - btn_hit_size/2, btn_y - btn_hit_size/2, 
-                btn_hit_size, btn_hit_size
-            ).contains(pos)
-            
-            self.btn_hover_states['play'] = QRectF(
-                center_x - btn_hit_size/2, btn_y - btn_hit_size/2, 
-                btn_hit_size, btn_hit_size
-            ).contains(pos)
-            
-            self.btn_hover_states['next'] = QRectF(
-                center_x + 60 - btn_hit_size/2, btn_y - btn_hit_size/2, 
-                btn_hit_size, btn_hit_size
-            ).contains(pos)
+            self.btn_hover_states['prev'] = QRectF(center_x - 60 - btn_hit_size/2, btn_y - btn_hit_size/2, btn_hit_size, btn_hit_size).contains(pos)
+            self.btn_hover_states['play'] = QRectF(center_x - btn_hit_size/2, btn_y - btn_hit_size/2, btn_hit_size, btn_hit_size).contains(pos)
+            self.btn_hover_states['next'] = QRectF(center_x + 60 - btn_hit_size/2, btn_y - btn_hit_size/2, btn_hit_size, btn_hit_size).contains(pos)
         else:
             self.is_bar_hovered = False
             self.btn_hover_states = {'prev': False, 'play': False, 'next': False}
-        
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event):
-        """Handle mouse press for button clicks and seeking."""
         if event.button() == Qt.MouseButton.LeftButton:
             if self.is_expanded and self.title_text != "Idle":
                 w = self.width()
@@ -473,10 +488,9 @@ class DynamicIsland(QMainWindow):
                 
                 bar_y = h - BARYPOS
                 btn_y = h - BTNYPOS
+                bar_x = 220
+                bar_w = w - 240
                 
-                # Check seek bar click
-                bar_x = 60
-                bar_w = w - 120
                 seek_rect = QRectF(bar_x, bar_y - 15, bar_w, 15)
                 if seek_rect.contains(pos):
                     rel_x = pos.x() - bar_x
@@ -487,7 +501,7 @@ class DynamicIsland(QMainWindow):
                     self.update()
                     return
 
-                center_x = w / 2
+                center_x = bar_x + bar_w/2
                 btn_hit_size = 40
                 
                 prev_rect = QRectF(center_x - 60 - btn_hit_size/2, btn_y - btn_hit_size/2, btn_hit_size, btn_hit_size)
@@ -513,13 +527,11 @@ class DynamicIsland(QMainWindow):
                     self.update()
                     return
             
-            # Toggle expanded mode
             self.is_expanded = not self.is_expanded
             self.vel_w += 10 if self.is_expanded else -5
             self.vel_h += 10 if self.is_expanded else -5
 
     def paintEvent(self, event):
-        """Main paint event - renders the entire widget."""
         from renderer import MediaRenderer
         renderer = MediaRenderer(self)
         renderer.render()
