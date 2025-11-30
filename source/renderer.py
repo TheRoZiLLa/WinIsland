@@ -1,6 +1,8 @@
-from PyQt6.QtCore import Qt, QRectF, QPointF
+from PyQt6.QtCore import Qt, QRectF, QPointF, QFileInfo
 from PyQt6.QtGui import (QPainter, QBrush, QPen, QFont, QPainterPath, 
-                         QLinearGradient, QColor, QFontMetrics, QPixmap)
+                         QLinearGradient, QColor, QFontMetrics, QPixmap, QIcon)
+from PyQt6.QtWidgets import QFileIconProvider
+import math
 
 from config import *
 from helpers import format_time
@@ -20,9 +22,29 @@ class MediaRenderer:
         
     def render(self):
         """Main rendering entry point."""
-        range_h = EXPAND_H - IDLE_H
+        # Determine target height for progress calc
+        target_h = EXPAND_H
+        is_tray_active = self.widget.tray.has_files() or self.widget.tray.is_dragging_file
+        is_tray_minimized = self.widget.tray.minimized
+        
+        if is_tray_active:
+            if is_tray_minimized:
+                # If minimized, height targets idle/hover height OR Expanded Media height
+                target_h = EXPAND_H if self.widget.is_expanded else IDLE_H
+            else:
+                target_h = EXPANDTRAY_H
+        elif self.widget.is_expanded:
+             target_h = EXPAND_H
+        else:
+             target_h = IDLE_H 
+
+        range_h = target_h - IDLE_H
         curr_off = self.widget.current_h - IDLE_H
-        self.progress = max(0.0, min(1.0, curr_off / range_h))
+        
+        if range_h <= 5: 
+            self.progress = 0.0
+        else:
+            self.progress = max(0.0, min(1.0, curr_off / range_h))
         
         self.progress_ratio = 0.0
         if self.widget.media_dur > 0:
@@ -32,68 +54,88 @@ class MediaRenderer:
         
         self._render_background()
         
-        # New unified rendering approach for smooth transitions
-        if self.widget.title_text != "Idle":
+        # Render Media Art if present
+        # Render media art if main island is NOT showing the TRAY VIEW
+        # Tray View shows only when (is_tray_active and NOT minimized)
+        show_media = (not is_tray_active) or (is_tray_minimized)
+        
+        if self.widget.title_text != "Idle" and show_media:
             self._render_interpolating_album_art()
         
         self._render_collapsed_content()
         self._render_expanded_content()
         
+        # Render the floating tray bubble on top if minimized/animating
+        if is_tray_active and is_tray_minimized:
+            self._render_liquid_bubble()
+        
         self.painter.end()
     
     def _create_clip_path(self):
+        """Creates the clip path for the MAIN island content."""
         path = QPainterPath()
         safe_radius = min(CORNER_RADIUS, self.h)
+        
+        # Calculate main island width based on bubble animation
+        # As bubble pops out (anim -> 1.0), main island shrinks/shifts left to make room
+        bubble_anim = self.widget.tray.pop_anim_progress
+        bubble_offset = (TRAY_BUBBLE_SIZE + TRAY_BUBBLE_GAP) * bubble_anim
+        main_w = self.w - bubble_offset
+        
+        # Draw Main Island (Pill Shape)
         path.moveTo(0, 0)
-        path.lineTo(self.w, 0)
-        path.lineTo(self.w, self.h - safe_radius)
-        path.cubicTo(self.w, self.h, self.w, self.h, self.w - safe_radius, self.h)
+        path.lineTo(main_w, 0)
+        path.lineTo(main_w, self.h - safe_radius)
+        path.cubicTo(main_w, self.h, main_w, self.h, main_w - safe_radius, self.h)
         path.lineTo(safe_radius, self.h)
         path.cubicTo(0, self.h, 0, self.h, 0, self.h - safe_radius)
         path.lineTo(0, 0)
+            
         return path
     
     def _render_background(self):
-        show_expanded_bg = (self.widget.is_expanded and self.widget.title_text != "Idle")
+        is_tray_active = (self.widget.tray.has_files() or self.widget.tray.is_dragging_file)
+        is_tray_minimized = self.widget.tray.minimized
+        
+        # Show expanded bg if manually expanded OR (tray active and NOT minimized)
+        # We also want standard bg if we are just hovering/expanding media while minimized tray exists
+        show_expanded_bg = (self.widget.is_expanded) or (is_tray_active and not is_tray_minimized)
         
         if show_expanded_bg:
             self.painter.save()
             self.painter.setClipPath(self.clip_path)
             self.painter.setOpacity(self.progress)
             
-            # --- New Logic: Use 5-Color Gradient Instead of Image ---
-            if self.widget.current_album_art:
+            has_media_art = self.widget.title_text != "Idle" and self.widget.current_album_art
+
+            if is_tray_active and not is_tray_minimized:
+                # Full Tray Background - Black
+                self.painter.fillRect(0, 0, self.w, self.h, COLOR_TRAY_BG)
+            elif has_media_art:
+                # Media Background
                 img = self.widget.current_album_art.toImage()
                 w, h = img.width(), img.height()
+                c1 = img.pixelColor(w // 2, h // 2)
+                c2 = img.pixelColor(w // 4, h // 4)
+                c3 = img.pixelColor(3 * w // 4, h // 4)
+                c4 = img.pixelColor(w // 4, 3 * h // 4)
+                c5 = img.pixelColor(3 * w // 4, 3 * h // 4)
                 
-                # Sample 5 distinct points for colors
-                c1 = img.pixelColor(w // 2, h // 2)       # Center
-                c2 = img.pixelColor(w // 4, h // 4)       # Top-Leftish
-                c3 = img.pixelColor(3 * w // 4, h // 4)   # Top-Rightish
-                c4 = img.pixelColor(w // 4, 3 * h // 4)   # Bottom-Leftish
-                c5 = img.pixelColor(3 * w // 4, 3 * h // 4) # Bottom-Rightish
-                
-                # Create gradient using these 5 colors
                 grad = QLinearGradient(0, 0, self.w, self.h)
                 grad.setColorAt(0.0, c2)
                 grad.setColorAt(0.25, c3)
                 grad.setColorAt(0.5, c1)
                 grad.setColorAt(0.75, c4)
                 grad.setColorAt(1.0, c5)
-                
-                # Fill background with gradient
                 self.painter.fillRect(0, 0, self.w, self.h, grad)
-                
-                # 2. Dark Overlay + More Black Gradient (Keep this for readability)
-                self.painter.fillRect(0, 0, self.w, self.h, QColor(0, 0, 0, 100)) # Base dimming
+                self.painter.fillRect(0, 0, self.w, self.h, QColor(0, 0, 0, 100))
                 
                 grad_black = QLinearGradient(0, 0, 0, self.h)
                 grad_black.setColorAt(0.0, QColor(0, 0, 0, 0))
-                grad_black.setColorAt(0.3, QColor(0, 0, 0, 40)) # Start darkening earlier
-                grad_black.setColorAt(0.7, QColor(0, 0, 0, 180)) # Much darker at bottom text area
-                grad_black.setColorAt(1.0, QColor(0, 0, 0, 255)) # Pure black at bottom
+                grad_black.setColorAt(0.3, QColor(0, 0, 0, 40))
+                grad_black.setColorAt(0.7, QColor(0, 0, 0, 180))
+                grad_black.setColorAt(1.0, QColor(0, 0, 0, 255))
                 self.painter.fillRect(0, 0, self.w, self.h, grad_black)
-                
             else:
                 self.painter.setBrush(QBrush(QColor(20, 20, 20)))
                 self.painter.drawRect(0, 0, self.w, self.h)
@@ -113,26 +155,16 @@ class MediaRenderer:
             self.painter.drawPath(self.clip_path)
 
     def _render_interpolating_album_art(self):
-        """
-        Calculates and draws the album art at a position interpolated between
-        its collapsed state (small icon) and expanded state (jewel case).
-        """
         if not self.widget.current_album_art:
             return
 
-        # --- Define Start State (Collapsed) ---
-        # Centered vertically in the 35px height bar
         start_size = 24
         start_x = 15
-        start_y = (IDLE_H - start_size) / 2 # ~5.5px
+        start_y = (IDLE_H - start_size) / 2
         
-        # --- Define End State (Expanded) ---
-        # Jewel Case position logic from _render_cd_layout
-        # We need to recalculate the final dimensions here to interpolate to them
         max_box_h = 130
         max_box_w = 180 
         
-        # Calculate aspect ratio scaling for the target
         scaled_pix = self.widget.current_album_art.scaled(
             int(max_box_w), int(max_box_h),
             Qt.AspectRatioMode.KeepAspectRatio,
@@ -143,43 +175,25 @@ class MediaRenderer:
         end_x = 25
         end_y = (self.h - end_h) // 2 - 10
         
-        # --- Interpolate ---
-        # We use a cubic easing for smoother pop
         t = self.progress
-        t = t * t * (3 - 2 * t) # Smoothstep
+        t = t * t * (3 - 2 * t)
         
         curr_w = start_size + (end_w - start_size) * t
         curr_h = start_size + (end_h - start_size) * t
         curr_x = start_x + (end_x - start_x) * t
-        
-        # Y is tricky because self.h changes.
-        # We want it relative to the visual top, but center alignment changes
-        # Simple interpolation of absolute Y might look jerky if window height grows fast.
-        # Instead, let's interpolate the "center Y" relative to current height
-        # start_center_y = IDLE_H / 2
-        # end_center_y = (self.h // 2) - 10 + (end_h / 2) # Roughly center of box
-        
         curr_y = start_y + (end_y - start_y) * t
         
-        # --- Draw The Box/Art ---
         self.painter.save()
         
-        # 1. CD Behind (Only visible as we expand)
-        # Fade in CD as we expand
         if self.progress > 0.1:
             cd_opacity = (self.progress - 0.1) / 0.9
-            # Also apply the text_change opacity for smooth track transitions
             self.painter.setOpacity(cd_opacity * self.widget.text_change_progress)
             
             cd_size = 140
-            # Interpolate CD X position too so it slides out from behind
-            # Start CD at same X as box, end at box + offset
             target_cd_x = end_x + CD_OFFSET_X
             curr_cd_x = curr_x + (target_cd_x - end_x) * t
-            
             cd_y_pos = (self.h - cd_size) // 2 - 10
             
-            # Draw spinning CD
             center_x = curr_cd_x + cd_size/2
             center_y = cd_y_pos + cd_size/2
             
@@ -191,7 +205,6 @@ class MediaRenderer:
             if self.widget.img_cd:
                 self.painter.drawPixmap(int(curr_cd_x), int(cd_y_pos), int(cd_size), int(cd_size), self.widget.img_cd)
             
-            # CD Center sticker
             art_diam = int(cd_size * 0.4)
             art_x = center_x - art_diam/2
             art_y = center_y - art_diam/2
@@ -201,32 +214,25 @@ class MediaRenderer:
             self.painter.drawPixmap(int(art_x), int(art_y), art_diam, art_diam, self.widget.current_album_art)
             self.painter.restore()
 
-        # 2. Main Art Box (Interpolated)
-        # Apply fade animation from logic
         box_opacity = 1.0
-        if self.progress > 0.8: # Fully expanded
+        if self.progress > 0.8:
              box_opacity = self.widget.box_fade_anim
         self.painter.setOpacity(box_opacity)
 
-        # Shadow (only when getting bigger)
         if self.progress > 0.2:
             self.painter.setPen(Qt.PenStyle.NoPen)
-            # FIX: Ensure alpha is an integer
             shadow_alpha = int(100 * self.progress)
             self.painter.setBrush(QBrush(QColor(0, 0, 0, shadow_alpha)))
             self.painter.drawRoundedRect(QRectF(curr_x+4*t, curr_y+4*t, curr_w, curr_h), 4, 4)
 
-        # The Image
         path = QPainterPath()
         path.addRoundedRect(QRectF(curr_x, curr_y, curr_w, curr_h), 4, 4)
         self.painter.setClipPath(path)
         self.painter.drawPixmap(QRectF(curr_x, curr_y, curr_w, curr_h).toRect(), 
                                self.widget.current_album_art)
         
-        # Gloss (only visible when larger)
         if self.progress > 0.5:
             grad = QLinearGradient(curr_x, curr_y, curr_x + curr_w, curr_y + curr_h)
-            # FIX: Ensure alpha is an integer
             gloss_alpha = int(30 * self.progress)
             grad.setColorAt(0.0, QColor(255, 255, 255, gloss_alpha))
             grad.setColorAt(0.5, QColor(255, 255, 255, 0))
@@ -241,53 +247,56 @@ class MediaRenderer:
         self.painter.save()
         opacity = 1.0 - (self.progress * 3)
         self.painter.setOpacity(max(0.0, opacity))
+        
+        # Calculate center relative to MAIN Island (ignoring bubble area)
+        bubble_anim = self.widget.tray.pop_anim_progress
+        bubble_offset = (TRAY_BUBBLE_SIZE + TRAY_BUBBLE_GAP) * bubble_anim
+        main_w = self.w - bubble_offset
+        
+        center_x = main_w / 2
         center_y = self.h / 2
         
-        if self.w > 120:
-            # Animation State (0.0 to 1.0)
+        if main_w > 120:
             anim_progress = self.widget.temp_mode_progress 
             
-            # --- Time Display (Leaving or Entering) ---
             if anim_progress < 0.99:
                 self.painter.save()
                 time_scale = 0.6 + (0.4 * (1.0 - anim_progress))
                 time_opacity = 1.0 - anim_progress
                 
-                self.painter.translate(self.w/2, self.h/2)
+                self.painter.translate(center_x, center_y)
                 self.painter.scale(time_scale, time_scale)
-                self.painter.translate(-self.w/2, -self.h/2)
+                self.painter.translate(-center_x, -center_y)
                 self.painter.setOpacity(max(0.0, opacity * time_opacity))
                 
                 self.painter.setPen(QPen(COLOR_TEXT_MAIN))
                 self.painter.setFont(QFont(FONT_FAMILY, 10, QFont.Weight.Bold))
-                self.painter.drawText(QRectF(0, 0, self.w, self.h), 
+                
+                self.painter.drawText(QRectF(0, 0, main_w, self.h), 
                                      Qt.AlignmentFlag.AlignCenter, 
                                      self.widget.display_time)
                 self.painter.restore()
             
-            # --- Title Display (Entering or Leaving) ---
             if anim_progress > 0.01:
                 self.painter.save()
                 title_scale = 0.6 + (0.4 * anim_progress)
                 title_opacity = anim_progress
                 
-                self.painter.translate(self.w/2, self.h/2)
+                self.painter.translate(center_x, center_y)
                 self.painter.scale(title_scale, title_scale)
-                self.painter.translate(-self.w/2, -self.h/2)
+                self.painter.translate(-center_x, -center_y)
                 self.painter.setOpacity(max(0.0, opacity * title_opacity))
                 
-                title_rect = QRectF(45, 0, self.w-90, self.h)
+                title_rect = QRectF(45, 0, main_w - 90, self.h)
                 self._draw_scrolling_text(title_rect, self.widget.title_text, 
                                          QFont(FONT_FAMILY, 10, QFont.Weight.Bold), 
                                          COLOR_TEXT_MAIN)
                 self.painter.restore()
 
         if self.widget.title_text != "Idle":
-            # NOTE: We removed the static album art drawing here because
-            # _render_interpolating_album_art now handles drawing it at small scale too.
-            
             vis_w = 30
-            vis_x = self.w - vis_w - 15
+            vis_x = main_w - vis_w - 15
+                
             if self.widget.vis_multiplier > 0.01:
                 self._draw_visualizer(vis_x, center_y, 14, vis_w, self.progress_ratio, 
                                      bar_width=3, align_bottom=False)
@@ -307,13 +316,191 @@ class MediaRenderer:
         opacity = (self.progress - 0.2) / 0.8
         self.painter.setOpacity(max(0.0, min(1.0, opacity)))
 
-        if self.widget.title_text == "Idle":
-            self._render_idle_state()
-        else:
-            self._render_cd_layout_controls_only()
+        show_tray = (self.widget.tray.has_files() or self.widget.tray.is_dragging_file)
+
+        if show_tray:
+            if not self.widget.tray.minimized:
+                self._render_tray_view()
+        
+        # We can show media controls if we are expanded AND (tray not showing OR tray is notch)
+        show_media = (not show_tray) or (self.widget.tray.minimized and self.widget.is_expanded)
+        
+        if show_media:
+            if self.widget.title_text == "Idle":
+                self._render_idle_state()
+            else:
+                bubble_anim = self.widget.tray.pop_anim_progress
+                bubble_offset = (TRAY_BUBBLE_SIZE + TRAY_BUBBLE_GAP) * bubble_anim
+                main_w = self.w - bubble_offset
+                self._render_cd_layout_controls_only(main_w)
         
         self.painter.restore()
     
+    def _render_liquid_bubble(self):
+        """Renders the isolated tray bubble with liquid connection logic."""
+        self.painter.save()
+        
+        # Animation Progress: 0 (Inside) -> 1 (Outside)
+        anim_progress = self.widget.tray.pop_anim_progress 
+        
+        # Dimensions
+        bubble_diam = TRAY_BUBBLE_SIZE
+        gap = TRAY_BUBBLE_GAP
+        
+        # 1. Main Island End Point (Right Edge)
+        main_right_edge_x = self.w - (bubble_diam + gap) * anim_progress
+        
+        # 2. Bubble Center
+        final_bubble_cx = self.w - bubble_diam/2 - 2
+        start_bubble_cx = self.w - bubble_diam/2 - 2 - (bubble_diam + gap) 
+        
+        bubble_cx = start_bubble_cx + (final_bubble_cx - start_bubble_cx) * anim_progress
+        bubble_cy = self.h / 2
+        bubble_r = bubble_diam / 2
+        
+        # 3. Liquid Bridge (Metaball-like effect)
+        if 0.05 < anim_progress < 0.95:
+            self.painter.setBrush(QBrush(COLOR_BG))
+            self.painter.setPen(Qt.PenStyle.NoPen)
+            
+            path = QPainterPath()
+            bridge_width_factor = 1.0 - abs(anim_progress - 0.5) * 2 
+            bridge_h = (bubble_r * 1.5) * bridge_width_factor
+            
+            p1 = QPointF(main_right_edge_x - 5, bubble_cy - bridge_h) 
+            p2 = QPointF(bubble_cx, bubble_cy - bridge_h * 0.8)       
+            p3 = QPointF(bubble_cx, bubble_cy + bridge_h * 0.8)       
+            p4 = QPointF(main_right_edge_x - 5, bubble_cy + bridge_h) 
+            
+            c1 = QPointF(main_right_edge_x + gap/2, bubble_cy - 5)
+            c2 = QPointF(main_right_edge_x + gap/2, bubble_cy + 5)
+            
+            path.moveTo(p1)
+            path.quadTo(c1, p2)
+            path.lineTo(p3)
+            path.quadTo(c2, p4)
+            path.closeSubpath()
+            
+            self.painter.drawPath(path)
+
+        # 4. Draw Bubble Circle
+        scale = 0.5 + 0.5 * anim_progress
+        self.painter.translate(bubble_cx, bubble_cy)
+        self.painter.scale(scale, scale)
+        self.painter.setBrush(QBrush(COLOR_BG)) 
+        self.painter.setPen(Qt.PenStyle.NoPen)
+        self.painter.drawEllipse(QPointF(0, 0), bubble_r, bubble_r)
+        
+        # 5. Draw Icon
+        self.painter.setOpacity(anim_progress)
+        self.painter.drawPixmap(-10, -10, 20, 20, self.widget.img_tray)
+        
+        self.painter.restore()
+
+    def _render_tray_view(self):
+        """Renders the Expanded Tray View with a separate visual notch for tray."""
+        # 1. Header Area: Icon + Title
+        self.painter.drawPixmap(20, 10, self.widget.img_tray)
+        
+        self.painter.setPen(QPen(COLOR_TEXT_MAIN))
+        self.painter.setFont(QFont(FONT_FAMILY, 14, QFont.Weight.Bold))
+        self.painter.drawText(55, 28, "Tray Files")
+        
+        # 2. Moving Grid Bar (Keep scanner line)
+        line_y = 45
+        line_start = 20
+        line_end = self.w - 20
+        
+        pen = QPen(QColor(100, 100, 100))
+        pen.setStyle(Qt.PenStyle.DotLine)
+        self.painter.setPen(pen)
+        self.painter.drawLine(line_start, line_y, line_end, line_y)
+        
+        t = self.widget.tray.tray_anim_timer 
+        if t < 1.0:
+            norm_t = t
+        else:
+            norm_t = 2.0 - t
+        norm_t = norm_t * norm_t * (3 - 2 * norm_t)
+        
+        box_width = 30
+        box_height = 4
+        track_width = line_end - line_start
+        max_travel = track_width - box_width
+        
+        box_x = line_start + max_travel * norm_t
+        
+        self.painter.setBrush(QBrush(COLOR_ACCENT))
+        self.painter.setPen(Qt.PenStyle.NoPen)
+        self.painter.drawRoundedRect(QRectF(box_x, line_y - box_height/2, box_width, box_height), 2, 2)
+        
+        # 3. Clear Button
+        clear_rect = QRectF(self.w - 70, 10, 50, 20)
+        if self.widget.tray.tray_clear_hover:
+             self.painter.setPen(QPen(QColor(255, 80, 80)))
+        else:
+             self.painter.setPen(QPen(QColor(180, 180, 180)))
+        self.painter.setFont(QFont(FONT_FAMILY, 9, QFont.Weight.Bold))
+        self.painter.drawText(clear_rect, Qt.AlignmentFlag.AlignCenter, "Clear")
+
+        # 4. Close Button
+        close_rect = QRectF(self.w - 100, 10, 20, 20)
+        if self.widget.tray.tray_close_hover:
+             self.painter.setBrush(QBrush(QColor(80, 80, 80)))
+        else:
+             self.painter.setBrush(Qt.BrushStyle.NoBrush)
+        self.painter.setPen(Qt.PenStyle.NoPen)
+        self.painter.drawRoundedRect(close_rect, 4, 4)
+        
+        self.painter.setPen(QPen(Qt.GlobalColor.white, 2))
+        c_center = close_rect.center()
+        self.painter.drawLine(int(c_center.x()-4), int(c_center.y()-4), int(c_center.x()+4), int(c_center.y()+4))
+        self.painter.drawLine(int(c_center.x()-4), int(c_center.y()+4), int(c_center.x()+4), int(c_center.y()-4))
+
+        # 5. File Grid (DASHED BOX STYLE UPDATE)
+        icon_provider = QFileIconProvider()
+        files = self.widget.tray.files
+        grid_start_y = 60
+        item_w, item_h = 70, 80
+        cols = max(1, (self.w - 40) // item_w)
+        
+        self.painter.setFont(QFont(FONT_FAMILY, 8))
+        
+        for i, file_path in enumerate(files):
+            row = i // cols
+            col = i % cols
+            x_pos = 20 + col * item_w
+            y_pos = grid_start_y + row * item_h
+            
+            # --- Dashed Border Box ---
+            # Increase box size slightly for padding
+            box_rect = QRectF(x_pos, y_pos, 60, 60)
+            
+            # Use DashLine for the border
+            dash_pen = QPen(QColor(120, 120, 120), 1)
+            dash_pen.setStyle(Qt.PenStyle.DashLine)
+            dash_pen.setDashPattern([4, 4]) 
+            
+            self.painter.setPen(dash_pen)
+            self.painter.setBrush(Qt.BrushStyle.NoBrush)
+            self.painter.drawRoundedRect(box_rect, 8, 8)
+            # -------------------------
+            
+            # Icon
+            file_info = QFileInfo(file_path)
+            icon = icon_provider.icon(file_info)
+            pixmap = icon.pixmap(32, 32)
+            
+            self.painter.drawPixmap(int(x_pos + (60 - 32)/2), int(y_pos + 14), pixmap)
+            
+            # Text
+            name = file_info.fileName()
+            fm = QFontMetrics(self.painter.font())
+            elided_name = fm.elidedText(name, Qt.TextElideMode.ElideMiddle, item_w - 5)
+            
+            self.painter.setPen(QPen(COLOR_TEXT_SUB))
+            self.painter.drawText(QRectF(x_pos, y_pos + 62, 60, 15), Qt.AlignmentFlag.AlignCenter, elided_name)
+
     def _render_idle_state(self):
         scale = 0.8 + (0.2 * self.widget.idle_scale_anim)
         opacity = self.widget.idle_scale_anim
@@ -338,16 +525,10 @@ class MediaRenderer:
                              "No Media Playing")
         self.painter.restore()
     
-    def _render_cd_layout_controls_only(self):
-        """
-        Renders ONLY the text and controls for the CD layout.
-        The Album Art and CD itself are handled by _render_interpolating_album_art
-        to allow for smooth transitioning.
-        """
+    def _render_cd_layout_controls_only(self, width):
         content_x = 220
-        content_w = self.w - content_x - 20
+        content_w = width - content_x - 20
         
-        # Track Change Animation (Scale/Fade)
         text_scale = 0.8 + (0.2 * self.widget.text_change_progress)
         text_opacity = self.widget.text_change_progress
         

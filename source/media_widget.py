@@ -1,16 +1,18 @@
 import time
 import math
 import random
+import os
 from datetime import datetime
 
 from PyQt6.QtWidgets import QMainWindow, QSystemTrayIcon, QMenu, QApplication
-from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF
+from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF, QUrl, QMimeData, QPoint
 from PyQt6.QtGui import (QPainter, QColor, QBrush, QFont, QPen, QAction, 
-                         QIcon, QPixmap, QPainterPath, QLinearGradient, QFontMetrics)
+                         QIcon, QPixmap, QPainterPath, QLinearGradient, QFontMetrics, QDrag)
 
 from config import *
 from helpers import load_or_create_icon, format_time
 from media_worker import MediaWorker
+from tray_manager import TrayManager
 
 
 class DynamicIsland(QMainWindow):
@@ -27,6 +29,7 @@ class DynamicIsland(QMainWindow):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)  # Enable Drag & Drop
         
         self.screen_width = QApplication.primaryScreen().size().width()
         
@@ -38,12 +41,29 @@ class DynamicIsland(QMainWindow):
         self._init_text_state()
         self._init_media_state()
         
+        # Initialize Tray Manager
+        self.tray = TrayManager(self)
+        
         # Load icons
         self.img_play = load_or_create_icon(IMG_PLAY_FILE, "play")
         self.img_pause = load_or_create_icon(IMG_PAUSE_FILE, "pause")
         self.img_next = load_or_create_icon(IMG_NEXT_FILE, "next")
         self.img_prev = load_or_create_icon(IMG_PREV_FILE, "prev")
         
+        # Load Tray Icon
+        if os.path.exists(IMG_TRAY_FILE):
+            self.img_tray = QPixmap(IMG_TRAY_FILE).scaled(24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        else:
+            # Fallback for tray icon
+            self.img_tray = QPixmap(24, 24)
+            self.img_tray.fill(Qt.GlobalColor.transparent)
+            pt = QPainter(self.img_tray)
+            pt.setBrush(QBrush(Qt.GlobalColor.white))
+            pt.setPen(Qt.PenStyle.NoPen)
+            pt.drawRect(4, 8, 16, 10)
+            pt.drawRect(8, 18, 8, 2)
+            pt.end()
+
         # Load CD Image
         self.img_cd = QPixmap(IMG_CD_FILE)
         if self.img_cd.isNull():
@@ -137,7 +157,7 @@ class DynamicIsland(QMainWindow):
         self.display_time = ""
         
         self.current_album_art = None
-        self.blurred_album_art = None # Store pre-blurred image
+        self.blurred_album_art = None 
         self.last_img_bytes = b""
         
         self.display_pos = 0.0
@@ -163,17 +183,11 @@ class DynamicIsland(QMainWindow):
         self.tray_icon.show()
 
     def _generate_blurred_art(self, pixmap):
-        """Generates a high quality blur by downscaling and upscaling smoothly."""
         if not pixmap or pixmap.isNull():
             return None
-            
-        # Scale down significantly (e.g., to 64px) to lose detail
         small_pix = pixmap.scaled(64, 64, 
                                 Qt.AspectRatioMode.KeepAspectRatioByExpanding, 
                                 Qt.TransformationMode.SmoothTransformation)
-        
-        # Scale back up to screen width to create smooth gradient/blur effect
-        # We start with a size larger than window to ensure coverage
         target_size = max(self.screen_width, 1000) 
         blurred = small_pix.scaled(target_size, target_size, 
                                  Qt.AspectRatioMode.KeepAspectRatioByExpanding, 
@@ -196,7 +210,6 @@ class DynamicIsland(QMainWindow):
                 self.temp_mode_start_time = time.time()
                 
             self.text_change_progress = 0.0
-            
             self.scroll_x = 0.0
             self.scroll_wait_timer = 5.0
             self.scroll_direction = 0
@@ -207,8 +220,6 @@ class DynamicIsland(QMainWindow):
                 self.prev_album_art = self.current_album_art
                 self.current_album_art = new_pix
                 self.last_img_bytes = img_bytes
-                
-                # Generate Blur immediately
                 self.blurred_album_art = self._generate_blurred_art(new_pix)
                 
                 if new_pix.width() > 0 and new_pix.height() > 0:
@@ -288,6 +299,9 @@ class DynamicIsland(QMainWindow):
         self.idle_scale_anim += (target_idle_scale - self.idle_scale_anim) * 0.1
         idle_animating = (abs(self.idle_scale_anim - target_idle_scale) > 0.01)
 
+        # Delegate Tray Animation
+        self.tray.update_anim(dt)
+
         if self.is_playing:
             self.cd_rotation = (self.cd_rotation + 1.5) % 360
         
@@ -309,7 +323,9 @@ class DynamicIsland(QMainWindow):
             abs(self.bar_hover_anim - target_bar) > 0.01 or
             is_scrolling or
             self.is_playing or
-            idle_animating
+            idle_animating or
+            self.tray.has_files() or
+            (self.tray.pop_anim_progress > 0.001 and self.tray.pop_anim_progress < 0.999) # Animate liquid
         )
         
         if should_repaint:
@@ -404,29 +420,49 @@ class DynamicIsland(QMainWindow):
 
     def animate_spring(self):
         has_media = (self.title_text != "Idle")
+        
+        tray_active = self.tray.has_files() or self.tray.is_dragging_file
+        tray_minimized = self.tray.minimized
+        
         current_idle_w = MEDIA_IDLE_W + (MEDIA_TEMP_W - MEDIA_IDLE_W) * self.temp_mode_progress
         target_idle_w = current_idle_w if has_media else IDLE_W
         target_hover_w = MEDIA_HOVER_W if has_media else HOVER_W
         
-        if self.is_expanded:
+        # Calculate extra width for bubble based on animation progress
+        # We assume the main window physically grows to accommodate the bubble clip path
+        bubble_anim = self.tray.pop_anim_progress # 0.0 to 1.0
+        extra_w = (TRAY_BUBBLE_SIZE + TRAY_BUBBLE_GAP) * bubble_anim
+        
+        if tray_active:
+             if tray_minimized:
+                 # When minimized, we base width on the MAIN island state + bubble offset
+                 # If main is expanded (media open), base is EXPAND_W
+                 # If main is collapsed/idle, base is target_idle_w
+                 
+                 base_w = EXPAND_W if self.is_expanded else target_idle_w
+                 self.target_w = base_w + extra_w
+                 
+                 # Height depends on if media is expanded
+                 self.target_h = EXPAND_H if self.is_expanded else IDLE_H
+             else:
+                 self.target_w = EXPANDTRAY_W
+                 self.target_h = EXPANDTRAY_H
+        elif self.is_expanded:
             self.target_w = EXPAND_W
             self.target_h = EXPAND_H
         elif self.is_hovered:
-            self.target_w = target_hover_w
+            self.target_w = target_hover_w + extra_w
             self.target_h = HOVER_H
         else:
-            self.target_w = target_idle_w
+            self.target_w = target_idle_w + extra_w
             self.target_h = IDLE_H
 
         force_w = (self.target_w - self.current_w) * SPRING_STIFFNESS
         force_h = (self.target_h - self.current_h) * SPRING_STIFFNESS
-        
         self.vel_w += force_w
         self.vel_h += force_h
-        
         self.vel_w *= SPRING_DAMPING
         self.vel_h *= SPRING_DAMPING
-        
         self.current_w += self.vel_w
         self.current_h += self.vel_h
         
@@ -444,30 +480,63 @@ class DynamicIsland(QMainWindow):
         x = (self.screen_width - w) // 2
         y = 0
         self.setGeometry(x, y, w, h)
+        
+    # --- Delegate Drag & Drop to TrayManager ---
+    def dragEnterEvent(self, event):
+        self.tray.handle_drag_enter(event)
 
+    def dragLeaveEvent(self, event):
+        self.tray.handle_drag_leave(event)
+        
+    def dropEvent(self, event):
+        self.tray.handle_drop(event)
+            
+    # --- Mouse Events (Delegated) ---
     def enterEvent(self, event):
         self.is_hovered = True
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         self.is_hovered = False
-        self.is_expanded = False
+        # Only auto-collapse if NOT in tray mode
+        if not self.tray.has_files():
+             self.is_expanded = False
         super().leaveEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self.is_expanded and self.title_text != "Idle":
-            w = self.width()
-            h = self.height()
-            pos = event.position()
+        pos = event.position()
+        w = self.width()
+        h = self.height()
+        
+        # 1. Tray Interactions (Delegated)
+        if self.tray.handle_mouse_move(event):
+            return 
             
+        self.tray.check_hover(pos)
+
+        # 2. Media Controls Hover Logic 
+        is_tray_minimized = self.tray.minimized
+        has_tray_files = self.tray.has_files()
+        
+        # Determine effective width for media controls (exclude bubble area if minimized)
+        main_media_w = w
+        if is_tray_minimized and has_tray_files:
+            bubble_anim = self.tray.pop_anim_progress
+            bubble_offset = (TRAY_BUBBLE_SIZE + TRAY_BUBBLE_GAP) * bubble_anim
+            main_media_w = w - bubble_offset
+
+        # Check if media is expanded
+        # Allow controls if we are expanded
+        if self.is_expanded and self.title_text != "Idle":
             bar_y = h - BARYPOS
             bar_x = 220 
-            bar_w = w - 240
+            bar_w = main_media_w - 240
+            
+            center_x = 220 + bar_w/2
             
             seek_rect = QRectF(bar_x, bar_y - 20, bar_w, 25)
             self.is_bar_hovered = seek_rect.contains(pos)
             
-            center_x = bar_x + bar_w/2
             btn_y = h - BTNYPOS
             btn_hit_size = 50
             
@@ -477,19 +546,37 @@ class DynamicIsland(QMainWindow):
         else:
             self.is_bar_hovered = False
             self.btn_hover_states = {'prev': False, 'play': False, 'next': False}
+        
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position()
+            self.tray.set_drag_start(pos.toPoint())
+            
+            # 1. Tray Click Handling (Delegated)
+            if self.tray.handle_click(pos):
+                return
+
+            w = self.width()
+            h = self.height()
+            is_tray_minimized = self.tray.minimized
+            has_tray_files = self.tray.has_files()
+            
+            # Determine effective width for media controls
+            main_media_w = w
+            if is_tray_minimized and has_tray_files:
+                bubble_anim = self.tray.pop_anim_progress
+                bubble_offset = (TRAY_BUBBLE_SIZE + TRAY_BUBBLE_GAP) * bubble_anim
+                main_media_w = w - bubble_offset
+
+            # 2. Media Interactions
             if self.is_expanded and self.title_text != "Idle":
-                w = self.width()
-                h = self.height()
-                pos = event.position()
-                
                 bar_y = h - BARYPOS
                 btn_y = h - BTNYPOS
                 bar_x = 220
-                bar_w = w - 240
+                bar_w = main_media_w - 240
+                center_x = 220 + bar_w/2
                 
                 seek_rect = QRectF(bar_x, bar_y - 15, bar_w, 15)
                 if seek_rect.contains(pos):
@@ -501,9 +588,7 @@ class DynamicIsland(QMainWindow):
                     self.update()
                     return
 
-                center_x = bar_x + bar_w/2
                 btn_hit_size = 40
-                
                 prev_rect = QRectF(center_x - 60 - btn_hit_size/2, btn_y - btn_hit_size/2, btn_hit_size, btn_hit_size)
                 play_rect = QRectF(center_x - btn_hit_size/2, btn_y - btn_hit_size/2, btn_hit_size, btn_hit_size)
                 next_rect = QRectF(center_x + 60 - btn_hit_size/2, btn_y - btn_hit_size/2, btn_hit_size, btn_hit_size)
@@ -527,9 +612,20 @@ class DynamicIsland(QMainWindow):
                     self.update()
                     return
             
-            self.is_expanded = not self.is_expanded
-            self.vel_w += 10 if self.is_expanded else -5
-            self.vel_h += 10 if self.is_expanded else -5
+            # 3. Global Toggle
+            # Check if click is within MAIN island area (Left side)
+            # This allows expanding media even if tray files are minimized (notch)
+            main_click = True
+            if has_tray_files and is_tray_minimized:
+                # If clicking outside main media width (i.e. on bubble or gap), don't toggle media
+                # Bubble click handled by tray.handle_click previously
+                if pos.x() > main_media_w:
+                    main_click = False 
+
+            if main_click:
+                self.is_expanded = not self.is_expanded
+                self.vel_w += 10 if self.is_expanded else -5
+                self.vel_h += 10 if self.is_expanded else -5
 
     def paintEvent(self, event):
         from renderer import MediaRenderer
