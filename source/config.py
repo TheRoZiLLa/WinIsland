@@ -21,7 +21,7 @@ MEDIA_HOVER_W = 330
 
 # Animation Settings
 TEMP_MODE_DURATION = 5.0
-CORNER_RADIUS = 800            
+CORNER_RADIUS = 800
 SPRING_STIFFNESS = 0.15
 SPRING_DAMPING = 0.62
 
@@ -53,3 +53,4 @@ IMG_NEXT_FILE = "asset/next.png"
 IMG_PREV_FILE = "asset/prev.png"
 IMG_CD_FILE = "asset/cd.png"
 IMG_TRAY_FILE = "asset/tray.png"
+IMG_FRAME_FILE = "asset/frame.png"
