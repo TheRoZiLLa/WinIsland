@@ -1,7 +1,7 @@
 from PyQt6.QtGui import QColor
 
 # Window Dimensions
-IDLE_W, IDLE_H = 200, 35        
+IDLE_W, IDLE_H = 200, 35
 HOVER_W, HOVER_H = 230, 42      
 
 # Standard Media Expansion
@@ -9,10 +9,6 @@ EXPAND_W, EXPAND_H = 520, 220
 
 # Tray Expansion
 EXPANDTRAY_W, EXPANDTRAY_H = 600, 250
-
-# Minimized Tray Bubble Settings
-TRAY_BUBBLE_SIZE = 35
-TRAY_BUBBLE_GAP = 10
 
 # Media Specific Widths
 MEDIA_IDLE_W = 300
@@ -31,7 +27,7 @@ BTNYPOS = 40
 CD_OFFSET_X = 80
 
 # Fonts
-FONT_FAMILY = "Segoe UI"
+FONT_FAMILY = "SF Pro Display"
 FONT_SIZE_CLOCK = 24
 FONT_SIZE_TITLE = 13
 FONT_SIZE_ARTIST = 9

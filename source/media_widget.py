@@ -13,12 +13,7 @@ from config import *
 from helpers import load_or_create_icon, format_time
 from media_worker import MediaWorker
 
-# Removed TrayManager import
-# from tray_manager import TrayManager 
-
 class DynamicIsland(QMainWindow):
-    """Main media widget with Dynamic Island style interface."""
-    
     def __init__(self):
         super().__init__()
         
@@ -30,7 +25,6 @@ class DynamicIsland(QMainWindow):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMouseTracking(True)
-        # self.setAcceptDrops(True) # Removed Drag & Drop support
         
         self.screen_width = QApplication.primaryScreen().size().width()
         
@@ -42,21 +36,15 @@ class DynamicIsland(QMainWindow):
         self._init_text_state()
         self._init_media_state()
         
-        # Removed Tray Manager initialization
-        # self.tray = TrayManager(self)
-        
         # Load icons
         self.img_play = load_or_create_icon(IMG_PLAY_FILE, "play")
         self.img_pause = load_or_create_icon(IMG_PAUSE_FILE, "pause")
         self.img_next = load_or_create_icon(IMG_NEXT_FILE, "next")
         self.img_prev = load_or_create_icon(IMG_PREV_FILE, "prev")
         
-        # Removed Tray Icon and Frame loading
-        
         # Load CD Image
         self.img_cd = QPixmap(IMG_CD_FILE)
         if self.img_cd.isNull():
-            # Fallback simple circle if file missing
             self.img_cd = QPixmap(200, 200)
             self.img_cd.fill(Qt.GlobalColor.transparent)
             p = QPainter(self.img_cd)
@@ -79,7 +67,6 @@ class DynamicIsland(QMainWindow):
         self.worker.metadata_updated.connect(self.on_metadata_sync)
         self.worker.start()
 
-        self.setup_tray() # Keeps system tray icon (bottom right of Windows), not the file tray
         self.update_clock_text() 
         self.update_geometry()
 
@@ -154,25 +141,6 @@ class DynamicIsland(QMainWindow):
         self.display_pos = 0.0
         self.media_dur = 0.0
         self.last_tick_time = time.time()
-
-    def setup_tray(self):
-        # This handles the Windows System Tray icon, unrelated to the file drag tray
-        self.tray_icon = QSystemTrayIcon(self)
-        pixmap = QPixmap(32, 32)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pixmap)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setBrush(QBrush(Qt.GlobalColor.black))
-        p.drawEllipse(4, 4, 24, 24)
-        p.end()
-        self.tray_icon.setIcon(QIcon(pixmap))
-        
-        menu = QMenu()
-        quit_act = QAction("Quit", self)
-        quit_act.triggered.connect(QApplication.instance().quit)
-        menu.addAction(quit_act)
-        self.tray_icon.setContextMenu(menu)
-        self.tray_icon.show()
 
     def _generate_blurred_art(self, pixmap):
         if not pixmap or pixmap.isNull():
@@ -450,11 +418,6 @@ class DynamicIsland(QMainWindow):
         x = (self.screen_width - w) // 2
         y = 0
         self.setGeometry(x, y, w, h)
-        
-    # --- Drag & Drop Removed ---
-    # def dragEnterEvent(self, event): ...
-    # def dragLeaveEvent(self, event): ...
-    # def dropEvent(self, event): ...
             
     # --- Mouse Events ---
     def enterEvent(self, event):
@@ -463,7 +426,7 @@ class DynamicIsland(QMainWindow):
 
     def leaveEvent(self, event):
         self.is_hovered = False
-        self.is_expanded = False # Always auto-collapse when leaving now
+        self.is_expanded = False
         super().leaveEvent(event)
 
     def mouseMoveEvent(self, event):

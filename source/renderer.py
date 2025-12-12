@@ -64,42 +64,63 @@ class MediaRenderer:
             has_media_art = self.widget.title_text != "Idle" and self.widget.current_album_art
 
             if has_media_art:
-                # Media Background
+                # 1. Background Album Art Layer
+                bg_pix = self.widget.blurred_album_art if self.widget.blurred_album_art else self.widget.current_album_art
+                
+                if bg_pix and not bg_pix.isNull():
+                    scaled_bg = bg_pix.scaled(self.w, self.h, 
+                                            Qt.AspectRatioMode.KeepAspectRatioByExpanding, 
+                                            Qt.TransformationMode.SmoothTransformation)
+                    
+                    x = (self.w - scaled_bg.width()) // 2
+                    y = (self.h - scaled_bg.height()) // 2
+                    self.painter.drawPixmap(x, y, scaled_bg)
+
+                # 2. Gradient Overlay Layer
                 img = self.widget.current_album_art.toImage()
                 w, h = img.width(), img.height()
-                c1 = img.pixelColor(w // 2, h // 2)
-                c2 = img.pixelColor(w // 4, h // 4)
-                c3 = img.pixelColor(3 * w // 4, h // 4)
-                c4 = img.pixelColor(w // 4, 3 * h // 4)
-                c5 = img.pixelColor(3 * w // 4, 3 * h // 4)
                 
-                t = time.time() * 0.2  # Speed of rotation
+                c1 = img.pixelColor(w // 2, h // 2)         # Center
+                c2 = img.pixelColor(w // 4, h // 4)         # Top-Left Quadrant
+                c3 = img.pixelColor(3 * w // 4, 3 * h // 4) # Bottom-Right Quadrant
+                
+                t = time.time()
+                t_rot = t * 0.4
+                t_move = t * 0.6
+
                 cx, cy = self.w / 2, self.h / 2
-                radius = max(self.w, self.h) 
+                radius = max(self.w, self.h) * 1.5 
                 
-                x1 = cx + math.cos(t) * radius
-                y1 = cy + math.sin(t) * radius
-                x2 = cx - math.cos(t) * radius
-                y2 = cy - math.sin(t) * radius
+                x1 = cx + math.cos(t_rot) * radius
+                y1 = cy + math.sin(t_rot) * radius
+                x2 = cx - math.cos(t_rot) * radius
+                y2 = cy - math.sin(t_rot) * radius
                 
                 grad = QLinearGradient(x1, y1, x2, y2)
-                # --------------------------------------
+                
+                alpha = 180
+                c1.setAlpha(alpha)
+                c2.setAlpha(alpha)
+                c3.setAlpha(alpha)
+
+                mid_pos = 0.5 + 0.25 * math.sin(t_move)
 
                 grad.setColorAt(0.0, c2)
-                grad.setColorAt(0.25, c3)
-                grad.setColorAt(0.5, c1)
-                grad.setColorAt(0.75, c4)
-                grad.setColorAt(1.0, c5)
-                self.painter.fillRect(0, 0, self.w, self.h, grad)
-                self.painter.fillRect(0, 0, self.w, self.h, QColor(0, 0, 0, 100))
+                grad.setColorAt(mid_pos, c1)
+                grad.setColorAt(1.0, c3)
                 
-                # --- CHANGED: Darker/Higher Bottom Gradient ---
+                self.painter.fillRect(0, 0, self.w, self.h, grad)
+                
+                # 3. Darkening Layer
+                self.painter.fillRect(0, 0, self.w, self.h, QColor(0, 0, 0, 40))
+                
+                # Stronger bottom gradient for controls
                 grad_black = QLinearGradient(0, 0, 0, self.h)
                 grad_black.setColorAt(0.0, QColor(0, 0, 0, 0))
-                grad_black.setColorAt(0.2, QColor(0, 0, 0, 50))   # Starts darkening earlier (was 0.3 -> 40)
-                grad_black.setColorAt(0.5, QColor(0, 0, 0, 200))  # Significant darkness midway (was 0.7 -> 180)
+                grad_black.setColorAt(0.2, QColor(0, 0, 0, 40))
+                grad_black.setColorAt(0.5, QColor(0, 0, 0, 180))
+                grad_black.setColorAt(0.8, QColor(0, 0, 0, 220))
                 grad_black.setColorAt(1.0, QColor(0, 0, 0, 255))
-                # ----------------------------------------------
                 
                 self.painter.fillRect(0, 0, self.w, self.h, grad_black)
             else:
@@ -259,6 +280,7 @@ class MediaRenderer:
             vis_x = self.w - vis_w - 15
                 
             if self.widget.vis_multiplier > 0.01:
+                # Use Bar Visualizer for Collapsed Mode
                 self._draw_visualizer(vis_x, center_y, 14, vis_w, self.progress_ratio, 
                                      bar_width=3, align_bottom=False)
             else:
@@ -312,7 +334,7 @@ class MediaRenderer:
         content_x = 220
         content_w = width - content_x - 20
         
-        text_scale = 0.8 + (0.2 * self.widget.text_change_progress)
+        text_scale = 1.0 + (0.2 * self.widget.text_change_progress)
         text_opacity = self.widget.text_change_progress
         
         self.painter.save()
@@ -323,14 +345,14 @@ class MediaRenderer:
         self.painter.translate(-cx_text, -cy_text)
         self.painter.setOpacity(text_opacity)
 
-        text_rect = QRectF(content_x, 30, content_w, 30)
+        text_rect = QRectF(content_x + 30, 30, content_w - 40, 30)
         self._draw_scrolling_text(text_rect, self.widget.title_text, 
                                  QFont(FONT_FAMILY, FONT_SIZE_TITLE, QFont.Weight.Bold), 
                                  COLOR_TEXT_MAIN)
         
         self.painter.setPen(QPen(COLOR_TEXT_SUB))
         self.painter.setFont(QFont(FONT_FAMILY, FONT_SIZE_ARTIST))
-        self.painter.drawText(QRectF(content_x, 55, content_w, 20), 
+        self.painter.drawText(QRectF(content_x + 10, 55, content_w, 20), 
                              Qt.AlignmentFlag.AlignCenter, 
                              self.widget.artist_text)
         self.painter.restore()
@@ -341,36 +363,144 @@ class MediaRenderer:
     def _render_progress_bar_cd_style(self, x, w):
         bar_y = self.h - BARYPOS
         
-        if self.widget.vis_multiplier > 0.01:
-            self._draw_visualizer(x, bar_y - 8, 25, w, self.progress_ratio, 
-                                 bar_width=5, align_bottom=True)
+        track_h = 6
+        track_y = bar_y - track_h/2
+
+        height = 8.0
+        radius = height / 2.0
+        draw_y = (bar_y - 6) - (height / 2.0)
         
-        anim_height = 4.0 + (4.0 * self.widget.bar_hover_anim)
-        anim_radius = anim_height / 2.0
-        draw_y = (bar_y - 6) - (anim_height / 2.0)
-        
+        base_color = self.widget.dominant_color
+        if not base_color.isValid():
+            base_color = COLOR_BAR_BG
+        else:
+            base_color = QColor(base_color)
+            base_color.setAlpha(50)
+
+        base_color2 = self.widget.dominant_color
+        if not base_color2.isValid():
+            base_color2 = COLOR_TEXT_MAIN
+        else:
+            base_color2 = QColor(base_color2)
+
         self.painter.setPen(Qt.PenStyle.NoPen)
-        self.painter.setBrush(QBrush(COLOR_BAR_BG))
-        self.painter.drawRoundedRect(QRectF(x, draw_y, w, anim_height), 
-                                     anim_radius, anim_radius)
+        self.painter.setBrush(QBrush(base_color))
+        self.painter.drawRoundedRect(QRectF(x, track_y - 6, w, track_h), track_h/2, track_h/2)
         
         if self.widget.media_dur > 0:
+            self._draw_samsung_wave_progress(x, bar_y, w, self.progress_ratio)
+
             prog_bar = min(1.0, max(0.0, self.widget.display_pos / self.widget.media_dur))
             fill_w = w * prog_bar
-            self.painter.setBrush(QBrush(COLOR_TEXT_MAIN))
-            self.painter.drawRoundedRect(QRectF(x, draw_y, fill_w, anim_height), 
-                                        anim_radius, anim_radius)
+            self.painter.setBrush(QBrush(base_color2))
+            self.painter.drawRoundedRect(QRectF(x - 2, draw_y, fill_w, height), 
+                                        radius, radius)
             
-            handle_radius = 4.0 + (1.0 * self.widget.bar_hover_anim)
+            handle_radius = 7.0 + (1.0 * self.widget.bar_hover_anim)
+            self.painter.setBrush(QBrush(Qt.GlobalColor.white))
             self.painter.drawEllipse(QPointF(x + fill_w, bar_y - 6), 
-                                    handle_radius, handle_radius)
+                                        handle_radius, handle_radius)
 
+        # 3. Time Text
         self.painter.setPen(QPen(COLOR_TEXT_SUB))
         self.painter.setFont(QFont(FONT_FAMILY, FONT_SIZE_TIME, QFont.Weight.Bold))
         curr_time_str = format_time(self.widget.display_pos)
         total_time_str = format_time(self.widget.media_dur)
         self.painter.drawText(int(x), int(bar_y + 15), curr_time_str)
         self.painter.drawText(int(x + w - 30), int(bar_y + 15), total_time_str)
+
+    def _draw_samsung_wave_progress(self, start_x, center_y, full_width, pct):
+        pct = max(0.0, min(1.0, pct))
+        fill_w = full_width * pct
+        
+        if fill_w < 1:
+            return
+
+        self.painter.save()
+        self.painter.setPen(Qt.PenStyle.NoPen)
+
+        # 1. Get Color from Album Art
+        base_color = self.widget.dominant_color
+        if not base_color.isValid():
+            base_color = QColor("#56CCF2")
+
+        c1 = base_color
+        c2 = base_color.lighter(130) # Slightly lighter end for gradient
+        
+        grad = QLinearGradient(start_x, center_y, start_x + fill_w, center_y)
+        grad.setColorAt(0.0, c1)
+        grad.setColorAt(1.0, c2)
+        
+        # 2. Audio Reactivity
+        avg_intensity = 0.0
+        if self.widget.vis_count > 5:
+            for i in range(5):
+                avg_intensity += self.widget.vis_bars[i]
+            avg_intensity /= 5.0
+        
+        # 3. Draw 3 Layers of Waves
+        # Order: Back (0.3) -> Middle (0.5) -> Front (0.7)
+        # Shift Y up by 6 pixels
+        draw_y = center_y - 10
+        
+        t = time.time()
+        base_amp = 3.0 + (avg_intensity * 10.0 * self.widget.vis_multiplier)
+        freq = 0.05
+        
+        layers = [
+            {'alpha': 0.25, 'speed': 5.0, 'phase': 3.0, 'amp_mult': 1.2},
+            {'alpha': 0.5, 'speed': 6.0, 'phase': 2.5, 'amp_mult': 1.2},
+            {'alpha': 0.75, 'speed': 7.0, 'phase': 1.5, 'amp_mult': 1.1},
+            {'alpha': 1.0, 'speed': 8.0, 'phase': 0.0, 'amp_mult': 1.0}
+        ]
+
+        for layer in layers:
+            self.painter.setOpacity(layer['alpha'])
+            
+            # Construct Wave Path
+            path = QPainterPath()
+            # Bottom of the wave shape (also shifted up)
+            path.moveTo(start_x, draw_y + 6) 
+            
+            steps = int(fill_w / 2)
+            if steps < 2: steps = 2
+            
+            speed = layer['speed']
+            phase = layer['phase']
+            amp = base_amp * layer['amp_mult']
+
+            for i in range(steps + 1):
+                px = start_x + (i * 2)
+                if px > start_x + fill_w: px = start_x + fill_w
+                
+                # Dampening calculations to smooth ends to 0
+                dist_from_start = px - start_x
+                dist_from_end = (start_x + fill_w) - px
+                taper_len = 60.0 # Pixel range for tapering
+                
+                damp_start = min(1.0, dist_from_start / taper_len)
+                damp_end = min(1.0, dist_from_end / taper_len)
+                dampening = damp_start * damp_end
+
+                # Sine wave calculation
+                # Original center was (center_y - 2). Shifting up by 6 makes it (draw_y - 2).
+                wave_y = draw_y - (math.sin(px * freq - t * speed + phase) * amp * dampening)
+                path.lineTo(px, wave_y)
+                
+            path.lineTo(start_x + fill_w, draw_y + 6) # Bottom right
+            path.lineTo(start_x, draw_y + 6)          # Close loop
+            
+            self.painter.setBrush(QBrush(grad))
+            self.painter.drawPath(path)
+
+        # # 4. Draw Handle (on top of everything)
+        # self.painter.setOpacity(1.0)
+        # handle_x = start_x + fill_w
+        # handle_radius = 7.0 + (2.0 * avg_intensity * self.widget.vis_multiplier)
+        # self.painter.setBrush(QBrush(Qt.GlobalColor.white))
+        # self.painter.drawEllipse(QPointF(handle_x, draw_y + 4), handle_radius, handle_radius)
+        
+        self.painter.restore()
 
     def _render_control_buttons_cd_style(self, x, w):
         center_x = x + w/2
@@ -400,6 +530,7 @@ class MediaRenderer:
     
     def _draw_visualizer(self, x, y, h, width_available, progress_ratio, 
                         bar_width=3, align_bottom=False):
+        # Reverted to BAR Style (The "Old One") for Collapsed Mode
         self.painter.save()
         self.painter.setPen(Qt.PenStyle.NoPen)
         gap = 2
